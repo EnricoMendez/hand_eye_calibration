@@ -26,8 +26,14 @@ class ArucoDetection(Node):
         # ArUco (OpenCV 4.6 style)
         self.aruco_dict = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50)
 
-        # In 4.6 this is the most compatible constructor:
-        self.parameters = cv2.aruco.DetectorParameters_create()
+        # Support both old and new OpenCV ArUco APIs.
+        if hasattr(cv2.aruco, 'DetectorParameters_create'):
+            self.parameters = cv2.aruco.DetectorParameters_create()
+        else:
+            self.parameters = cv2.aruco.DetectorParameters()
+        self.detector = None
+        if hasattr(cv2.aruco, 'ArucoDetector'):
+            self.detector = cv2.aruco.ArucoDetector(self.aruco_dict, self.parameters)
 
         # Pub/Sub
         self.pub_detection = self.create_publisher(Image, 'detection', 10)
@@ -79,12 +85,14 @@ class ArucoDetection(Node):
     def detect(self, src):
         gray = cv2.cvtColor(src, cv2.COLOR_BGR2GRAY)
 
-        # OpenCV 4.6 API (no ArucoDetector)
-        corners, ids, rejected = cv2.aruco.detectMarkers(
-            gray,
-            self.aruco_dict,
-            parameters=self.parameters
-        )
+        if self.detector is not None:
+            corners, ids, rejected = self.detector.detectMarkers(gray)
+        else:
+            corners, ids, rejected = cv2.aruco.detectMarkers(
+                gray,
+                self.aruco_dict,
+                parameters=self.parameters
+            )
         return corners, ids, rejected
 
 

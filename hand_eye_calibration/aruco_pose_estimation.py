@@ -22,6 +22,9 @@ class ArucoPoseEstimation(Node):
         self.camera_matrix = None
         self.dist_coeffs = None
         self.bridge = CvBridge()
+        # Marker target: set to an integer ID (e.g. 0) or None to process all markers.
+        target_marker_id = 12
+        self.target_marker_id = None if target_marker_id is None else int(target_marker_id)
 
         # "Log once" flags
         self._got_first_image = False
@@ -30,7 +33,7 @@ class ArucoPoseEstimation(Node):
         self._warned_no_camera_info = False
 
         # Params
-        self.declare_parameter('marker_length', 0.075)  # meters
+        self.declare_parameter('marker_length', 0.1)  # meters
         self.declare_parameter('image_topic', '/camera/camera/color/image_rect_raw')
         self.declare_parameter('camera_info_topic', '/camera/camera/color/camera_info')
         marker_length = self.get_parameter('marker_length').value
@@ -41,8 +44,14 @@ class ArucoPoseEstimation(Node):
         # ArUco (OpenCV 4.6 style)
         self.aruco_dict = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50)
 
-        # In 4.6 this is the most compatible constructor:
-        self.parameters = cv2.aruco.DetectorParameters_create()
+        # Support both old and new OpenCV ArUco APIs.
+        if hasattr(cv2.aruco, 'DetectorParameters_create'):
+            self.parameters = cv2.aruco.DetectorParameters_create()
+        else:
+            self.parameters = cv2.aruco.DetectorParameters()
+        self.detector = None
+        if hasattr(cv2.aruco, 'ArucoDetector'):
+            self.detector = cv2.aruco.ArucoDetector(self.aruco_dict, self.parameters)
 
         # Pub/Sub
         self.pub_detection = self.create_publisher(Image, 'detection', 10)
@@ -106,23 +115,26 @@ class ArucoPoseEstimation(Node):
 
         if ids is not None and len(ids) > 0:
             marker_ids = ids.flatten().tolist()
-            id0_indices = [i for i, marker_id in enumerate(marker_ids) if marker_id == 0]
+            if self.target_marker_id is None:
+                selected_indices = list(range(len(marker_ids)))
+            else:
+                selected_indices = [
+                    i for i, marker_id in enumerate(marker_ids)
+                    if marker_id == self.target_marker_id
+                ]
 
-            if len(id0_indices) > 0:
-                id0_corners = [corners[i] for i in id0_indices]
-                id0_ids = np.array([[0] for _ in id0_indices], dtype=ids.dtype)
-                cv2.aruco.drawDetectedMarkers(frame, id0_corners, id0_ids)
+            if len(selected_indices) > 0:
+                selected_corners = [corners[i] for i in selected_indices]
+                selected_marker_ids = [marker_ids[i] for i in selected_indices]
+                selected_ids = np.array([[marker_id] for marker_id in selected_marker_ids], dtype=ids.dtype)
+                cv2.aruco.drawDetectedMarkers(frame, selected_corners, selected_ids)
 
-                rvecs, tvecs, _ = cv2.aruco.estimatePoseSingleMarkers(
-                    id0_corners,
-                    self.marker_length,
-                    self.camera_matrix,
-                    self.dist_coeffs
-                )
+                rvecs, tvecs = self.estimate_marker_poses(selected_corners)
 
-                for i in range(len(id0_indices)):
-                    rvec = rvecs[i][0]
-                    tvec = tvecs[i][0]
+                for i in range(len(rvecs)):
+                    rvec = rvecs[i]
+                    tvec = tvecs[i]
+                    marker_id = selected_marker_ids[i]
                     pose = self.build_pose(rvec, tvec)
                     pose_array.poses.append(pose)
 
@@ -136,11 +148,14 @@ class ArucoPoseEstimation(Node):
                     )
 
                     self.get_logger().info(
-                        f"Marker 0: x={tvec[0]:.3f}, y={tvec[1]:.3f}, z={tvec[2]:.3f} m",
+                        f"Marker {marker_id}: x={tvec[0]:.3f}, y={tvec[1]:.3f}, z={tvec[2]:.3f} m",
                         throttle_duration_sec=1.0
                     )
             else:
-                self.get_logger().info('No marker with ID 0 detected', throttle_duration_sec=2.0)
+                self.get_logger().info(
+                    f'No marker with ID {self.target_marker_id} detected',
+                    throttle_duration_sec=2.0
+                )
         else:
             self.get_logger().info('No markers detected', throttle_duration_sec=2.0)
 
@@ -170,15 +185,56 @@ class ArucoPoseEstimation(Node):
         pose.orientation.w = float(qw)
         return pose
 
+    def estimate_marker_poses(self, marker_corners):
+        # Try legacy API first when available.
+        if hasattr(cv2.aruco, 'estimatePoseSingleMarkers'):
+            rvecs, tvecs, _ = cv2.aruco.estimatePoseSingleMarkers(
+                marker_corners,
+                self.marker_length,
+                self.camera_matrix,
+                self.dist_coeffs
+            )
+            return [r[0] for r in rvecs], [t[0] for t in tvecs]
+
+        # OpenCV 4.11+: estimate marker pose with solvePnP.
+        half = self.marker_length / 2.0
+        obj_points = np.array(
+            [
+                [-half, half, 0.0],
+                [half, half, 0.0],
+                [half, -half, 0.0],
+                [-half, -half, 0.0],
+            ],
+            dtype=np.float32
+        )
+
+        rvecs = []
+        tvecs = []
+        for marker in marker_corners:
+            img_points = marker.reshape(4, 2).astype(np.float32)
+            ok, rvec, tvec = cv2.solvePnP(
+                obj_points,
+                img_points,
+                self.camera_matrix,
+                self.dist_coeffs,
+                flags=cv2.SOLVEPNP_IPPE_SQUARE
+            )
+            if ok:
+                rvecs.append(rvec.reshape(3))
+                tvecs.append(tvec.reshape(3))
+        return rvecs, tvecs
+
     def detect(self, src):
         gray = cv2.cvtColor(src, cv2.COLOR_BGR2GRAY)
 
-        # OpenCV 4.6 API (no ArucoDetector)
-        corners, ids, rejected = cv2.aruco.detectMarkers(
-            gray,
-            self.aruco_dict,
-            parameters=self.parameters
-        )
+        if self.detector is not None:
+            corners, ids, rejected = self.detector.detectMarkers(gray)
+        else:
+            corners, ids, rejected = cv2.aruco.detectMarkers(
+                gray,
+                self.aruco_dict,
+                parameters=self.parameters
+            )
         return corners, ids, rejected
 
 
