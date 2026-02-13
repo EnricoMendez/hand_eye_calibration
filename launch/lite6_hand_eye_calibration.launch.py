@@ -24,6 +24,7 @@ def generate_launch_description():
         DeclareLaunchArgument('marker_length', default_value='0.075'),
         DeclareLaunchArgument('image_topic', default_value='/camera/camera/color/image_rect_raw'),
         DeclareLaunchArgument('camera_info_topic', default_value='/camera/camera/color/camera_info'),
+        DeclareLaunchArgument('target_marker_id', default_value='12'),
         DeclareLaunchArgument('marker_topic', default_value='/marker_poses'),
         DeclareLaunchArgument('min_samples', default_value='15'),
         DeclareLaunchArgument('base_frame', default_value='link_base'),
@@ -46,6 +47,7 @@ def generate_launch_description():
     marker_length = LaunchConfiguration('marker_length')
     image_topic = LaunchConfiguration('image_topic')
     camera_info_topic = LaunchConfiguration('camera_info_topic')
+    target_marker_id = LaunchConfiguration('target_marker_id')
     marker_topic = LaunchConfiguration('marker_topic')
     min_samples = LaunchConfiguration('min_samples')
     base_frame = LaunchConfiguration('base_frame')
@@ -128,6 +130,7 @@ def generate_launch_description():
                 'marker_length': marker_length,
                 'image_topic': image_topic,
                 'camera_info_topic': camera_info_topic,
+                'target_marker_id': target_marker_id,
             }
         ],
     )

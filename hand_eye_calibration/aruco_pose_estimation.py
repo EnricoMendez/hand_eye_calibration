@@ -21,10 +21,8 @@ class ArucoPoseEstimation(Node):
         self.image = None
         self.camera_matrix = None
         self.dist_coeffs = None
+        self.camera_frame_id = ''
         self.bridge = CvBridge()
-        # Marker target: set to an integer ID (e.g. 0) or None to process all markers.
-        target_marker_id = 12
-        self.target_marker_id = None if target_marker_id is None else int(target_marker_id)
 
         # "Log once" flags
         self._got_first_image = False
@@ -36,10 +34,13 @@ class ArucoPoseEstimation(Node):
         self.declare_parameter('marker_length', 0.1)  # meters
         self.declare_parameter('image_topic', '/camera/camera/color/image_rect_raw')
         self.declare_parameter('camera_info_topic', '/camera/camera/color/camera_info')
+        self.declare_parameter('target_marker_id', 12)  # set <0 to process all markers
         marker_length = self.get_parameter('marker_length').value
         self.marker_length = float(marker_length)
         self.image_topic = str(self.get_parameter('image_topic').value)
         self.camera_info_topic = str(self.get_parameter('camera_info_topic').value)
+        target_marker_id = int(self.get_parameter('target_marker_id').value)
+        self.target_marker_id = None if target_marker_id < 0 else target_marker_id
 
         # ArUco (OpenCV 4.6 style)
         self.aruco_dict = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50)
@@ -88,6 +89,7 @@ class ArucoPoseEstimation(Node):
 
         self.camera_matrix = np.array(msg.k, dtype=np.float64).reshape(3, 3)
         self.dist_coeffs = np.array(msg.d, dtype=np.float64)
+        self.camera_frame_id = msg.header.frame_id
 
     def timer_callback(self):
         if self.image is None:
@@ -110,7 +112,7 @@ class ArucoPoseEstimation(Node):
         corners, ids, rejected = self.detect(frame)
 
         pose_array = PoseArray()
-        pose_array.header.frame_id = 'camera_color_optical_frame'
+        pose_array.header.frame_id = self.camera_frame_id if self.camera_frame_id else 'camera_color_optical_frame'
         pose_array.header.stamp = self.get_clock().now().to_msg()
 
         if ids is not None and len(ids) > 0:

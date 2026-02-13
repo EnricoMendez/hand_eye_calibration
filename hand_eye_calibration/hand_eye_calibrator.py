@@ -1,3 +1,26 @@
+"""Interactive eye-in-hand calibration node.
+
+Quick usage:
+- Run node:
+  ros2 run hand_eye_calibration hand_eye_calibrator --ros-args \
+    -p marker_topic:=/marker_poses -p min_samples:=15 \
+    -p base_frame:=link_base -p ee_frame:=link_eef \
+    -p camera_frame:=camera_color_optical_frame
+
+Keyboard controls:
+- s: capture sample
+- c: compute calibration
+- w: write calibration JSON
+- r: reset captured samples
+- q: quit node
+
+Equivalent services:
+- /capture_sample (std_srvs/Trigger)
+- /compute_calibration (std_srvs/Trigger)
+- /save_calibration (std_srvs/Trigger)
+- /reset_samples (std_srvs/Trigger)
+"""
+
 import json
 import os
 import select
@@ -6,10 +29,12 @@ import termios
 import threading
 import tty
 from datetime import datetime
+from pathlib import Path
 
 import cv2
 import numpy as np
 import rclpy
+from ament_index_python.packages import get_package_share_directory
 from geometry_msgs.msg import Pose, PoseArray, TransformStamped
 from rclpy.node import Node
 from std_srvs.srv import Trigger
@@ -81,6 +106,27 @@ def compose_transform(rot_ab, trans_ab, rot_bc, trans_bc):
     return rot_ac, trans_ac
 
 
+def default_output_file():
+    package_name = "hand_eye_calibration"
+    filename = "hand_eye_calibration_result.json"
+
+    # Source workspace candidate: <repo_root>/Config/<filename>
+    source_cfg_dir = Path(__file__).resolve().parents[1] / "Config"
+    if source_cfg_dir.is_dir() and os.access(source_cfg_dir, os.W_OK):
+        return str(source_cfg_dir / filename)
+
+    # Installed package candidate: <share>/<package>/Config/<filename>
+    try:
+        share_cfg_dir = Path(get_package_share_directory(package_name)) / "Config"
+        if share_cfg_dir.is_dir() and os.access(share_cfg_dir, os.W_OK):
+            return str(share_cfg_dir / filename)
+    except Exception:
+        pass
+
+    # Fallback for read-only installs.
+    return str(Path("/tmp") / filename)
+
+
 class HandEyeCalibrator(Node):
     def __init__(self):
         super().__init__("hand_eye_calibrator")
@@ -93,7 +139,7 @@ class HandEyeCalibrator(Node):
         self.declare_parameter("min_samples", 15)
         self.declare_parameter("marker_pose_index", 0)
         self.declare_parameter("solver_method", "TSAI")
-        self.declare_parameter("output_file", "/tmp/hand_eye_calibration_result.json")
+        self.declare_parameter("output_file", default_output_file())
         self.declare_parameter("viz_topic", "/hand_eye_calibration/axes")
         self.declare_parameter("axis_length", 0.08)
         self.declare_parameter("camera_estimated_frame", "camera_estimated")
@@ -235,7 +281,8 @@ class HandEyeCalibrator(Node):
             return False, f"Not enough samples: {n}/{self.min_samples}"
 
         try:
-            rot_c2g, trans_c2g = cv2.calibrateHandEye(
+            # OpenCV returns camera->gripper ({}^gT_c), i.e. ee_frame -> camera_frame.
+            rot_cam2gripper, trans_cam2gripper = cv2.calibrateHandEye(
                 self.R_gripper2base,
                 self.t_gripper2base,
                 self.R_target2cam,
@@ -245,24 +292,28 @@ class HandEyeCalibrator(Node):
         except Exception as exc:
             return False, f"calibrateHandEye failed: {exc}"
 
-        trans_c2g = np.asarray(trans_c2g, dtype=np.float64).reshape(3)
-        rot_g2c, trans_g2c = invert_transform(rot_c2g, trans_c2g)
-        quat_g2c = rot_to_quaternion(rot_g2c)
-        self.calib_rot_g2c = rot_g2c
-        self.calib_trans_g2c = trans_g2c
+        trans_cam2gripper = np.asarray(trans_cam2gripper, dtype=np.float64).reshape(3)
+        quat_cam2gripper = rot_to_quaternion(rot_cam2gripper)
+
+        rot_gripper2cam, trans_gripper2cam = invert_transform(rot_cam2gripper, trans_cam2gripper)
+        quat_gripper2cam = rot_to_quaternion(rot_gripper2cam)
+
+        # Used later as base->ee compose ee->camera = base->camera.
+        self.calib_rot_g2c = rot_cam2gripper
+        self.calib_trans_g2c = trans_cam2gripper
 
         self.last_result = {
             "timestamp": datetime.utcnow().isoformat() + "Z",
             "samples": n,
             "method": self.solver_method,
             "camera_to_gripper": {
-                "rotation_matrix": rot_c2g.tolist(),
-                "translation_xyz": trans_c2g.tolist(),
+                "rotation_matrix": rot_cam2gripper.tolist(),
+                "translation_xyz": trans_cam2gripper.tolist(),
             },
             "gripper_to_camera": {
-                "rotation_matrix": rot_g2c.tolist(),
-                "translation_xyz": trans_g2c.tolist(),
-                "quaternion_xyzw": quat_g2c.tolist(),
+                "rotation_matrix": rot_gripper2cam.tolist(),
+                "translation_xyz": trans_gripper2cam.tolist(),
+                "quaternion_xyzw": quat_gripper2cam.tolist(),
             },
             "frames": {
                 "base_frame": self.base_frame,
@@ -276,13 +327,13 @@ class HandEyeCalibrator(Node):
         tf_msg.header.stamp = self.get_clock().now().to_msg()
         tf_msg.header.frame_id = self.ee_frame
         tf_msg.child_frame_id = self.result_child_frame
-        tf_msg.transform.translation.x = float(trans_g2c[0])
-        tf_msg.transform.translation.y = float(trans_g2c[1])
-        tf_msg.transform.translation.z = float(trans_g2c[2])
-        tf_msg.transform.rotation.x = float(quat_g2c[0])
-        tf_msg.transform.rotation.y = float(quat_g2c[1])
-        tf_msg.transform.rotation.z = float(quat_g2c[2])
-        tf_msg.transform.rotation.w = float(quat_g2c[3])
+        tf_msg.transform.translation.x = float(trans_cam2gripper[0])
+        tf_msg.transform.translation.y = float(trans_cam2gripper[1])
+        tf_msg.transform.translation.z = float(trans_cam2gripper[2])
+        tf_msg.transform.rotation.x = float(quat_cam2gripper[0])
+        tf_msg.transform.rotation.y = float(quat_cam2gripper[1])
+        tf_msg.transform.rotation.z = float(quat_cam2gripper[2])
+        tf_msg.transform.rotation.w = float(quat_cam2gripper[3])
         self.tf_static_broadcaster.sendTransform(tf_msg)
 
         self._auto_compute_done = True

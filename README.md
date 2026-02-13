@@ -71,6 +71,53 @@ Comando recomendado:
 ros2 launch hand_eye_calibration lite6_hand_eye_calibration.launch.py robot_ip:=192.168.0.12 add_gripper:=true
 ```
 
+## Comandos rápidos
+
+Levantar todo (robot + cámara + detección + calibrador + RViz):
+
+```bash
+ros2 launch hand_eye_calibration lite6_hand_eye_calibration.launch.py \
+  robot_ip:=192.168.0.12 add_gripper:=true
+```
+
+Levantar solo detector de pose ArUco:
+
+```bash
+ros2 run hand_eye_calibration aruco_pose_estimation --ros-args \
+  -p marker_length:=0.075 \
+  -p target_marker_id:=12
+```
+
+Levantar solo calibrador hand-eye:
+
+```bash
+ros2 run hand_eye_calibration hand_eye_calibrator --ros-args \
+  -p marker_topic:=/marker_poses \
+  -p min_samples:=15 \
+  -p base_frame:=link_base \
+  -p ee_frame:=link_eef \
+  -p camera_frame:=camera_color_optical_frame
+```
+
+Servicios (alternativa a teclado):
+
+```bash
+ros2 service call /capture_sample std_srvs/srv/Trigger "{}"
+ros2 service call /compute_calibration std_srvs/srv/Trigger "{}"
+ros2 service call /save_calibration std_srvs/srv/Trigger "{}"
+ros2 service call /reset_samples std_srvs/srv/Trigger "{}"
+```
+
+Teclas en terminal del calibrador:
+
+```text
+s: capturar muestra
+c: calcular calibración
+w: guardar JSON
+r: reset de muestras
+q: salir
+```
+
 Notas:
 - Los logs de RealSense se silencian en pantalla (`output:=log`, `log_level:=error`).
 - Los logs de `aruco_pose_estimation` también se reducen para no ensuciar terminal.
@@ -85,6 +132,7 @@ Notas:
 - `realsense_log_level` (default `error`)
 - `min_samples` (default `15`)
 - `marker_length` (default `0.075`)
+- `target_marker_id` (default `12`, usar `<0` para procesar todos)
 
 ## Visualización en RViz
 
@@ -120,7 +168,8 @@ ros2 run hand_eye_calibration random_marker_motion --ros-args \
 ## Archivo de salida de calibración
 
 Por defecto:
-- `/tmp/hand_eye_calibration_result.json`
+- `Config/hand_eye_calibration_result.json` dentro del paquete (si es escribible)
+- fallback: `/tmp/hand_eye_calibration_result.json` cuando el paquete instalado no permite escritura
 
 Incluye:
 - `camera_to_gripper`
